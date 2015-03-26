@@ -1,6 +1,5 @@
-libsbuf.a: sbuf.o
-	ar rvs $@ $^
+libsbuf: libsbuf.a(sbuf.o)
 
 .PHONY: clean
 clean:
-	rm -f *.o *.a
+	$(RM) *.o *.a
