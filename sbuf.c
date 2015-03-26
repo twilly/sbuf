@@ -76,45 +76,8 @@
 /*
  * Debugging support
  */
-#if defined(_KERNEL) && defined(INVARIANTS)
-
-static void
-_assert_sbuf_integrity(const char *fun, struct sbuf *s)
-{
-
-	KASSERT(s != NULL,
-	    ("%s called with a NULL sbuf pointer", fun));
-	KASSERT(s->s_buf != NULL,
-	    ("%s called with uninitialized or corrupt sbuf", fun));
-        if (SBUF_ISFINISHED(s) && SBUF_NULINCLUDED(s)) {
-		KASSERT(s->s_len <= s->s_size,
-		    ("wrote past end of sbuf (%jd >= %jd)",
-		    (intmax_t)s->s_len, (intmax_t)s->s_size));
-	} else {
-		KASSERT(s->s_len < s->s_size,
-		    ("wrote past end of sbuf (%jd >= %jd)",
-		    (intmax_t)s->s_len, (intmax_t)s->s_size));
-	}
-}
-
-static void
-_assert_sbuf_state(const char *fun, struct sbuf *s, int state)
-{
-
-	KASSERT((s->s_flags & SBUF_FINISHED) == state,
-	    ("%s called with %sfinished or corrupt sbuf", fun,
-	    (state ? "un" : "")));
-}
-
-#define	assert_sbuf_integrity(s) _assert_sbuf_integrity(__func__, (s))
-#define	assert_sbuf_state(s, i)	 _assert_sbuf_state(__func__, (s), (i))
-
-#else /* _KERNEL && INVARIANTS */
-
 #define	assert_sbuf_integrity(s) do { } while (0)
 #define	assert_sbuf_state(s, i)	 do { } while (0)
-
-#endif /* _KERNEL && INVARIANTS */
 
 #ifdef CTASSERT
 CTASSERT(powerof2(SBUF_MAXEXTENDSIZE));
@@ -223,37 +186,6 @@ sbuf_new(struct sbuf *s, char *buf, int length, int flags)
 	SBUF_SETFLAG(s, SBUF_DYNSTRUCT);
 	return (s);
 }
-
-#ifdef _KERNEL
-/*
- * Create an sbuf with uio data
- */
-struct sbuf *
-sbuf_uionew(struct sbuf *s, struct uio *uio, int *error)
-{
-
-	KASSERT(uio != NULL,
-	    ("%s called with NULL uio pointer", __func__));
-	KASSERT(error != NULL,
-	    ("%s called with NULL error pointer", __func__));
-
-	s = sbuf_new(s, NULL, uio->uio_resid + 1, 0);
-	if (s == NULL) {
-		*error = ENOMEM;
-		return (NULL);
-	}
-	*error = uiomove(s->s_buf, uio->uio_resid, uio);
-	if (*error != 0) {
-		sbuf_delete(s);
-		return (NULL);
-	}
-	s->s_len = s->s_size - 1;
-	if (SBUF_ISSECTION(s))
-		s->s_sect_len = s->s_size - 1;
-	*error = 0;
-	return (s);
-}
-#endif
 
 int
 sbuf_get_flags(struct sbuf *s)
@@ -419,36 +351,6 @@ sbuf_bcat(struct sbuf *s, const void *buf, size_t len)
 	return (0);
 }
 
-#ifdef _KERNEL
-/*
- * Copy a byte string from userland into an sbuf.
- */
-int
-sbuf_bcopyin(struct sbuf *s, const void *uaddr, size_t len)
-{
-
-	assert_sbuf_integrity(s);
-	assert_sbuf_state(s, 0);
-	KASSERT(s->s_drain_func == NULL,
-	    ("Nonsensical copyin to sbuf %p with a drain", s));
-
-	if (s->s_error != 0)
-		return (-1);
-	if (len == 0)
-		return (0);
-	if (len > SBUF_FREESPACE(s)) {
-		sbuf_extend(s, len - SBUF_FREESPACE(s));
-		if (SBUF_FREESPACE(s) < len)
-			len = SBUF_FREESPACE(s);
-	}
-	if (copyin(uaddr, s->s_buf + s->s_len, len) != 0)
-		return (-1);
-	s->s_len += len;
-
-	return (0);
-}
-#endif
-
 /*
  * Copy a byte string into an sbuf.
  */
@@ -484,47 +386,6 @@ sbuf_cat(struct sbuf *s, const char *str)
 	return (0);
 }
 
-#ifdef _KERNEL
-/*
- * Append a string from userland to an sbuf.
- */
-int
-sbuf_copyin(struct sbuf *s, const void *uaddr, size_t len)
-{
-	size_t done;
-
-	assert_sbuf_integrity(s);
-	assert_sbuf_state(s, 0);
-	KASSERT(s->s_drain_func == NULL,
-	    ("Nonsensical copyin to sbuf %p with a drain", s));
-
-	if (s->s_error != 0)
-		return (-1);
-
-	if (len == 0)
-		len = SBUF_FREESPACE(s);	/* XXX return 0? */
-	if (len > SBUF_FREESPACE(s)) {
-		sbuf_extend(s, len);
-		if (SBUF_FREESPACE(s) < len)
-			len = SBUF_FREESPACE(s);
-	}
-	switch (copyinstr(uaddr, s->s_buf + s->s_len, len + 1, &done)) {
-	case ENAMETOOLONG:
-		s->s_error = ENOMEM;
-		/* fall through */
-	case 0:
-		s->s_len += done - 1;
-		if (SBUF_ISSECTION(s))
-			s->s_sect_len += done - 1;
-		break;
-	default:
-		return (-1);	/* XXX */
-	}
-
-	return (done);
-}
-#endif
-
 /*
  * Copy a string into an sbuf.
  */
@@ -542,36 +403,6 @@ sbuf_cpy(struct sbuf *s, const char *str)
 /*
  * Format the given argument list and append the resulting string to an sbuf.
  */
-#ifdef _KERNEL
-
-/*
- * Append a non-NUL character to an sbuf.  This prototype signature is
- * suitable for use with kvprintf(9).
- */
-static void
-sbuf_putc_func(int c, void *arg)
-{
-
-	if (c != '\0')
-		sbuf_put_byte(arg, c);
-}
-
-int
-sbuf_vprintf(struct sbuf *s, const char *fmt, va_list ap)
-{
-
-	assert_sbuf_integrity(s);
-	assert_sbuf_state(s, 0);
-
-	KASSERT(fmt != NULL,
-	    ("%s called with a NULL format string", __func__));
-
-	(void)kvprintf(fmt, sbuf_putc_func, s, 10, ap);
-	if (s->s_error != 0)
-		return (-1);
-	return (0);
-}
-#else /* !_KERNEL */
 int
 sbuf_vprintf(struct sbuf *s, const char *fmt, va_list ap)
 {
@@ -638,7 +469,6 @@ sbuf_vprintf(struct sbuf *s, const char *fmt, va_list ap)
 		return (-1);
 	return (0);
 }
-#endif /* _KERNEL */
 
 /*
  * Format the given arguments and append the resulting string to an sbuf.
@@ -720,15 +550,11 @@ sbuf_finish(struct sbuf *s)
 			s->s_error = sbuf_drain(s);
 	}
 	SBUF_SETFLAG(s, SBUF_FINISHED);
-#ifdef _KERNEL
-	return (s->s_error);
-#else
 	if (s->s_error != 0) {
 		errno = s->s_error;
 		return (-1);
 	}
 	return (0);
-#endif
 }
 
 /*
