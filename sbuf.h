@@ -33,7 +33,7 @@
 
 #include <stdarg.h>
 
-#define __printflike(x, y) __attribute__((format(printf, (x), (y))));
+#define __printflike(x, y) __attribute__((format(printf, (x), (y))))
 
 struct sbuf;
 typedef int (sbuf_drain_func)(void *, const char *, int);
